@@ -1,0 +1,87 @@
+{
+  "info": {
+    "name": "OGCR Operator Platform - Partner API",
+    "description": "Read-only partner access: key check, parcel search by area, document download. Set the collection variables base_url and api_key.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {"key": "base_url", "value": "https://api-operator.gilab.rs/api/partner"},
+    {"key": "api_key", "value": "ogcr_PASTE_KEY_HERE"},
+    {"key": "document_id", "value": "1"}
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {"key": "key", "value": "Authorization", "type": "string"},
+      {"key": "value", "value": "Api-Key {{api_key}}", "type": "string"},
+      {"key": "in", "value": "header", "type": "string"}
+    ]
+  },
+  "item": [
+    {
+      "name": "1. Index (public)",
+      "request": {"method": "GET", "auth": {"type": "noauth"}, "url": "{{base_url}}/"},
+      "event": [{"listen": "test", "script": {"exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));",
+        "pm.test('lists parcel_search', () => pm.expect(pm.response.json().endpoints).to.have.property('parcel_search'));"
+      ]}}]
+    },
+    {
+      "name": "2. Ping (key check)",
+      "request": {"method": "GET", "url": "{{base_url}}/ping/"},
+      "event": [{"listen": "test", "script": {"exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));",
+        "pm.test('partner name present', () => pm.expect(pm.response.json().partner).to.be.a('string'));"
+      ]}}]
+    },
+    {
+      "name": "3. Ping without key -> 401",
+      "request": {"method": "GET", "auth": {"type": "noauth"}, "url": "{{base_url}}/ping/"},
+      "event": [{"listen": "test", "script": {"exec": ["pm.test('401', () => pm.response.to.have.status(401));"]}}]
+    },
+    {
+      "name": "4. Parcel search (area over the demo parcels, drafts included)",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "url": "{{base_url}}/parcels/search/",
+        "body": {"mode": "raw", "raw": "{\n  \"geometry\": {\n    \"type\": \"Polygon\",\n    \"coordinates\": [[[0.4, 47.5], [2.5, 47.5], [2.5, 48.3], [0.4, 48.3], [0.4, 47.5]]]\n  },\n  \"include_unsubmitted\": true,\n  \"include_documents\": true\n}"}
+      },
+      "event": [{"listen": "test", "script": {"exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));",
+        "const body = pm.response.json();",
+        "pm.test('FeatureCollection', () => pm.expect(body.type).to.eql('FeatureCollection'));",
+        "const docs = body.features.flatMap(f => f.properties.documents || []);",
+        "if (docs.length) { pm.collectionVariables.set('document_id', docs[0].id); console.log('document_id set to', docs[0].id); }"
+      ]}}]
+    },
+    {
+      "name": "5. Parcel search (submitted projects only, default)",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "url": "{{base_url}}/parcels/search/",
+        "body": {"mode": "raw", "raw": "{\n  \"geometry\": {\n    \"type\": \"Polygon\",\n    \"coordinates\": [[[0.4, 47.5], [2.5, 47.5], [2.5, 48.3], [0.4, 48.3], [0.4, 47.5]]]\n  }\n}"}
+      },
+      "event": [{"listen": "test", "script": {"exec": ["pm.test('200', () => pm.response.to.have.status(200));"]}}]
+    },
+    {
+      "name": "6. Parcel search with invalid geometry -> 400",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "url": "{{base_url}}/parcels/search/",
+        "body": {"mode": "raw", "raw": "{\"geometry\": {\"type\": \"Point\", \"coordinates\": [2.3, 47.6]}}"}
+      },
+      "event": [{"listen": "test", "script": {"exec": ["pm.test('400', () => pm.response.to.have.status(400));"]}}]
+    },
+    {
+      "name": "7. Download document",
+      "request": {"method": "GET", "url": "{{base_url}}/documents/{{document_id}}/download/"},
+      "event": [{"listen": "test", "script": {"exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));",
+        "pm.test('checksum header', () => pm.expect(pm.response.headers.get('X-Checksum-SHA256')).to.have.lengthOf(64));"
+      ]}}]
+    }
+  ]
+}

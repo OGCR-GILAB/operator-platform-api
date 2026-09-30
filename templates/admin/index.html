@@ -1,0 +1,88 @@
+{% extends "unfold/layouts/base_simple.html" %}
+{% load i18n unfold %}
+
+{% block breadcrumbs %}{% endblock %}
+
+{% block title %}{% trans "Dashboard" %} | {{ site_title|default:_("Django site admin") }}{% endblock %}
+
+{% block branding %}
+  <h1 id="site-name"><a href="{% url 'admin:index' %}">{{ site_header|default:_("Django administration") }}</a></h1>
+{% endblock %}
+
+{% block content %}
+  {% component "unfold/components/container.html" %}
+
+    {% component "unfold/components/flex.html" with class="gap-4 mb-8 flex-wrap" %}
+      {% for stat in kpi %}
+        {% component "unfold/components/card.html" with class="flex-1 min-w-40" href=stat.link %}
+          {% component "unfold/components/text.html" %}{{ stat.title }}{% endcomponent %}
+          {% component "unfold/components/title.html" %}
+            {% if stat.alert %}<span class="text-red-600 dark:text-red-400">{{ stat.metric }}</span>{% else %}{{ stat.metric }}{% endif %}
+          {% endcomponent %}
+        {% endcomponent %}
+      {% endfor %}
+    {% endcomponent %}
+
+    {% component "unfold/components/flex.html" with class="gap-8 flex-col lg:flex-row" %}
+
+      {% component "unfold/components/card.html" with class="lg:w-1/3" title=_("Projects by status") %}
+        <table class="w-full text-sm">
+          <tbody>
+            {% for row in status_rows %}
+              <tr class="border-b border-base-200 dark:border-base-800 last:border-0">
+                <td class="py-2"><a class="text-primary-600 dark:text-primary-500" href="/admin/projects/project/?status__exact={{ row.value }}">{{ row.label }}</a></td>
+                <td class="py-2 text-right font-semibold">{{ row.count }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endcomponent %}
+
+      {% component "unfold/components/card.html" with class="lg:w-2/3" title=_("Recently updated projects") %}
+        <table class="w-full text-sm">
+          <thead class="text-left text-base-500 dark:text-base-400">
+            <tr><th class="py-2">Project</th><th class="py-2">Operator</th><th class="py-2">Status</th><th class="py-2">DCR</th><th class="py-2">Updated</th></tr>
+          </thead>
+          <tbody>
+            {% for project in recent_projects %}
+              <tr class="border-b border-base-200 dark:border-base-800 last:border-0">
+                <td class="py-2"><a class="text-primary-600 dark:text-primary-500" href="{% url 'admin:projects_project_change' project.pk %}">{{ project.name }}</a></td>
+                <td class="py-2">{{ project.operator|default:"-" }}</td>
+                <td class="py-2">{{ project.get_status_display }}</td>
+                <td class="py-2">{{ project.get_dcr_sync_status_display }}</td>
+                <td class="py-2">{{ project.updated_at|date:"Y-m-d H:i" }}</td>
+              </tr>
+            {% empty %}
+              <tr><td class="py-2 text-base-500" colspan="5">{% trans "No projects yet" %}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endcomponent %}
+
+    {% endcomponent %}
+
+    <div class="mt-8">
+      {% component "unfold/components/card.html" with title=_("Recent documents") %}
+        <table class="w-full text-sm">
+          <thead class="text-left text-base-500 dark:text-base-400">
+            <tr><th class="py-2">Title</th><th class="py-2">Kind</th><th class="py-2">Attached to</th><th class="py-2">Uploaded by</th><th class="py-2">When</th></tr>
+          </thead>
+          <tbody>
+            {% for doc in recent_documents %}
+              <tr class="border-b border-base-200 dark:border-base-800 last:border-0">
+                <td class="py-2"><a class="text-primary-600 dark:text-primary-500" href="{% url 'admin:documents_document_change' doc.pk %}">{{ doc.title }} v{{ doc.version }}</a></td>
+                <td class="py-2">{{ doc.get_kind_display }}</td>
+                <td class="py-2">{% if doc.project_id %}project #{{ doc.project_id }}{% else %}parcel #{{ doc.parcel_id }}{% endif %}</td>
+                <td class="py-2">{{ doc.uploaded_by }}</td>
+                <td class="py-2">{{ doc.uploaded_at|date:"Y-m-d H:i" }}</td>
+              </tr>
+            {% empty %}
+              <tr><td class="py-2 text-base-500" colspan="5">{% trans "No documents yet" %}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endcomponent %}
+    </div>
+
+  {% endcomponent %}
+{% endblock %}

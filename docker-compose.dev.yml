@@ -1,0 +1,14 @@
+# Development overrides: live-reloading runserver on a bind mount, DB exposed to the host.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+services:
+  api:
+    command: python manage.py runserver 0.0.0.0:8000
+    environment:
+      DJANGO_DEBUG: "1"
+      COLLECT_STATIC: "0"
+    volumes:
+      - .:/app
+
+  db:
+    ports:
+      - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"

@@ -1,0 +1,53 @@
+name: ogcr-operator
+
+services:
+  db:
+    image: postgis/postgis:16-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-operator}
+      POSTGRES_USER: ${POSTGRES_USER:-operator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-operator}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-operator} -d ${POSTGRES_DB:-operator}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build: .
+    image: ogcr/operator-api:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: db
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - static:/app/staticfiles
+      - media:/app/media
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # Frontend: add here when the SPA exists (separate build context, e.g. ../operator-frontend).
+  # frontend:
+  #   build: ../operator-frontend
+  #   restart: unless-stopped
+  #   ports:
+  #     - "${FRONTEND_PORT:-8080}:80"
+  #   depends_on:
+  #     - api
+
+volumes:
+  pgdata:
+  static:
+  media:
