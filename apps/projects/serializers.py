@@ -33,6 +33,38 @@ class MonitoringPlanSerializer(serializers.ModelSerializer):
         return value
 
 
+MEDIA_KEYS = {"link", "title", "type", "author", "published_date", "image"}
+
+
+def validate_media_links(value):
+    """A list of URLs or of objects with `link` (URL) and optional descriptive fields."""
+    if not isinstance(value, list):
+        raise serializers.ValidationError("media_links must be a list")
+    url = serializers.URLField()
+    date = serializers.DateField()
+    cleaned = []
+    for i, item in enumerate(value):
+        try:
+            if isinstance(item, str):
+                cleaned.append(url.run_validation(item))
+                continue
+            if not isinstance(item, dict) or "link" not in item:
+                raise serializers.ValidationError("use a URL or an object with `link`")
+            unknown = set(item) - MEDIA_KEYS
+            if unknown:
+                raise serializers.ValidationError(f"unknown keys: {', '.join(sorted(unknown))}")
+            entry = {k: str(v).strip() for k, v in item.items() if v not in (None, "")}
+            entry["link"] = url.run_validation(entry.get("link", ""))
+            if entry.get("image"):
+                entry["image"] = url.run_validation(entry["image"])
+            if entry.get("published_date"):
+                entry["published_date"] = date.run_validation(entry["published_date"]).isoformat()
+            cleaned.append(entry)
+        except serializers.ValidationError as exc:
+            raise serializers.ValidationError({i: exc.detail}) from exc
+    return cleaned
+
+
 class ProjectSerializer(serializers.ModelSerializer):
     owner = serializers.PrimaryKeyRelatedField(read_only=True)
     owner_username = serializers.CharField(source="owner.username", read_only=True)
@@ -50,7 +82,7 @@ class ProjectSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Project
-        exclude = ["dcr_response"]
+        exclude = ["dcr_response", "dcr_links"]
         read_only_fields = SYNC_FIELDS + ["status", "submitted_at", "created_at", "updated_at"]
 
     def get_document_count(self, obj) -> int:
@@ -69,6 +101,23 @@ class ProjectSerializer(serializers.ModelSerializer):
         if not operator.memberships.filter(user=request.user).exists():
             raise serializers.ValidationError("You are not a member of this operator")
         return operator
+
+    def validate_media_links(self, value):
+        return validate_media_links(value)
+
+    def _id_list(self, value, name):
+        if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+            raise serializers.ValidationError(f"{name} must be a list of non-empty strings")
+        return list(dict.fromkeys(v.strip() for v in value))
+
+    def validate_technologies_practices_processes(self, value):
+        return self._id_list(value, "technologies_practices_processes")
+
+    def validate_cobenefits(self, value):
+        return self._id_list(value, "cobenefits")
+
+    def validate_sustainable_development_goals(self, value):
+        return self._id_list(value, "sustainable_development_goals")
 
     def validate_country_code(self, value):
         value = (value or "").strip().upper()
@@ -96,6 +145,8 @@ class SubmissionErrorSerializer(serializers.Serializer):
     detail = serializers.CharField()
     step = serializers.CharField(required=False)
     problems = serializers.ListField(child=serializers.CharField(), required=False)
+    bank_id = serializers.CharField(required=False)
+    missing_roles = serializers.ListField(child=serializers.CharField(), required=False)
 
 
 class ReadinessCheckSerializer(serializers.Serializer):
@@ -116,15 +167,41 @@ class ReadinessSerializer(serializers.Serializer):
 class DCRParcelStatusSerializer(serializers.Serializer):
     parcel = serializers.IntegerField()
     parcel_dcr_id = serializers.CharField(allow_blank=True)
+    name = serializers.CharField(allow_blank=True)
+    cadastral_reference = serializers.CharField(allow_blank=True)
+    has_verdict = serializers.BooleanField(
+        help_text="True when the certifier recorded a verdict for this parcel itself; "
+        "otherwise the activity verification applies"
+    )
     status_code = serializers.CharField()
     status_message = serializers.CharField(allow_blank=True)
     amount = serializers.IntegerField(allow_null=True)
     owner_verification = serializers.DictField(allow_null=True)
 
 
+class AmendmentSerializer(serializers.Serializer):
+    stage = serializers.ChoiceField(choices=["validation", "verification"], allow_null=True)
+    status_code = serializers.CharField()
+    message = serializers.CharField(allow_blank=True)
+
+
 class DCRStatusSerializer(serializers.Serializer):
     status = serializers.CharField()
+    amendment = AmendmentSerializer(
+        allow_null=True,
+        help_text="Set while the certifier waits for changes (status changes_requested)",
+    )
     dcr_id = serializers.CharField(allow_blank=True)
     verification = serializers.DictField(allow_null=True)
     parcels = DCRParcelStatusSerializer(many=True)
+    certificate = serializers.DictField(
+        allow_null=True,
+        help_text="Newest certificate_of_compliance with certification_status certified/active",
+    )
+    certificates = serializers.ListField(
+        child=serializers.DictField(), help_text="All certificates of compliance, newest first"
+    )
+    audit_reports = serializers.ListField(
+        child=serializers.DictField(), help_text="Audit reports, newest first"
+    )
     checked_at = serializers.DateTimeField(allow_null=True)

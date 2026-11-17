@@ -35,6 +35,8 @@ class ProjectAdmin(GISModelAdmin, ModelAdmin):
         "dcr_synced_at",
         "dcr_response",
         "dcr_verification",
+        "dcr_certificates",
+        "dcr_audit_reports",
         "dcr_status_checked_at",
     )
     autocomplete_fields = ("owner", "operator")

@@ -48,6 +48,9 @@ DEBUG = env_bool("DJANGO_DEBUG", False)
 # localhost is always allowed so the in-container healthcheck works behind any hostname
 ALLOWED_HOSTS = list(dict.fromkeys(env_list("DJANGO_ALLOWED_HOSTS") + ["localhost", "127.0.0.1"]))
 CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS")
+# public address of this API (e.g. https://api-operator.gilab.rs), for links written to DCR
+# outside a request, such as the partner download URL of a supporting document
+PUBLIC_API_URL = (env("PUBLIC_API_URL", "") or "").rstrip("/")
 
 BEHIND_PROXY = env_bool("DJANGO_BEHIND_PROXY", False)
 if BEHIND_PROXY:
@@ -93,6 +96,7 @@ INSTALLED_APPS = [
     "apps.parcels",
     "apps.documents",
     "apps.partners",
+    "apps.changelog",
 ]
 
 MIDDLEWARE = [
@@ -293,7 +297,12 @@ if "test" in sys.argv:
 
 DCR = {
     "BASE_URL": (env("DCR_BASE_URL", "") or "").rstrip("/"),
-    "API_VERSION": env("DCR_API_VERSION", "v6.0.0"),
+    "API_VERSION": env("DCR_API_VERSION", "v7.0.0"),
+    # bank that holds the OGCR bank-level dynamic entities and their roles
+    "BANK_ID": env("DCR_BANK_ID", "ogcr"),
+    # common prefix for ids this platform creates on DCR; empty in production, set on test
+    # setups so a partner's test instance can pick out the records (e.g. "OPP-TEST")
+    "ID_PREFIX": env("DCR_ID_PREFIX", ""),
     "CONSUMER_KEY": env("DCR_CONSUMER_KEY", ""),
     "CONSUMER_SECRET": env("DCR_CONSUMER_SECRET", ""),
     "TIMEOUT": env_int("DCR_TIMEOUT", 15),
@@ -305,6 +314,10 @@ DCR = {
     "SERVICE_USERNAME": env("DCR_SERVICE_USERNAME", ""),
     "SERVICE_PASSWORD": env("DCR_SERVICE_PASSWORD", ""),
 }
+if "test" in sys.argv:
+    # tests never reach the real DCR; calls that are not mocked fail as "not configured"
+    DCR["BASE_URL"] = ""
+    DCR["ID_PREFIX"] = ""  # tests expect plain ids whatever the environment sets
 
 # ---------------------------------------------------------------------------
 # Documents (supporting files for projects and parcels, stored under MEDIA_ROOT)
@@ -330,6 +343,9 @@ MAX_GEOMETRY_VERTICES = env_int("MAX_GEOMETRY_VERTICES", 50000)
 # ---------------------------------------------------------------------------
 # Admin (django-unfold)
 # ---------------------------------------------------------------------------
+
+# the admin is the only login form; without ?next= it would redirect to /accounts/profile/
+LOGIN_REDIRECT_URL = "/admin/"
 
 UNFOLD = {
     "SITE_TITLE": "OGCR Operator Platform",

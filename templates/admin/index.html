@@ -10,6 +10,14 @@
 {% endblock %}
 
 {% block content %}
+  {% if limited %}
+  {% component "unfold/components/container.html" %}
+    {% component "unfold/components/card.html" with title=_("Welcome") %}
+      <p>{% trans "Your account can open the release notes: what each build changed, what is planned next and where each partner thread stands." %}</p>
+      <p style="margin-top:.75rem"><a class="text-primary-600 dark:text-primary-500" href="{% url 'release-notes' %}">{% trans "Open the release notes" %} &rarr;</a></p>
+    {% endcomponent %}
+  {% endcomponent %}
+  {% else %}
   {% component "unfold/components/container.html" %}
 
     {% component "unfold/components/flex.html" with class="gap-4 mb-8 flex-wrap" %}
@@ -85,4 +93,5 @@
     </div>
 
   {% endcomponent %}
+{% endif %}
 {% endblock %}

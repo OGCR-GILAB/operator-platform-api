@@ -20,7 +20,23 @@ UNIT_TYPES = {
     "Carbon Storage in Product": "CARBON_STORAGE_IN_PRODUCTS",
 }
 
-VERIFICATION_STATUSES = ["in_progress", "verified", "failed"]
+VERIFICATION_STATUSES = [
+    "draft",
+    "pending",
+    "under_review",
+    "validated",
+    "denied",
+    "in_progress",
+    "verified",
+    "failed",
+    "validation_amendment_required",
+    "verification_amendment_required",
+]
+# the certifier asks the operator to change the activity, at validation or at verification
+AMENDMENT_STATUSES = ("validation_amendment_required", "verification_amendment_required")
+# denied = failed at validation, failed = failed at verification; both end the activity
+FAILED_VERDICTS = ("denied", "failed")
+FINAL_VERDICTS = ("verified", *FAILED_VERDICTS)
 
 PRACTICE_EXAMPLES = ["cover_cropping", "reduced_tillage", "precision_fertilization"]
 COBENEFIT_EXAMPLES = ["biodiversity", "water_quality", "soil_health"]

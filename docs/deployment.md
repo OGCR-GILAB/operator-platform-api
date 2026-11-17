@@ -54,7 +54,10 @@ All configuration is through environment variables.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DCR_API_VERSION` | `v6.0.0` | DCR API version |
+| `DCR_API_VERSION` | `v7.0.0` | DCR API version |
+| `DCR_BANK_ID` | `ogcr` | bank holding the OGCR dynamic entities and their roles; empty selects system-level entities |
+| `PUBLIC_API_URL` | empty | public address of this API, e.g. `https://api-operator.example.org`; used in document links written to DCR (`supporting_document.url`) |
+| `DCR_ID_PREFIX` | empty | common prefix for ids created on DCR (`<prefix>_act_...`); keep empty in production, set on test setups |
 | `DCR_SERVICE_USERNAME`, `DCR_SERVICE_PASSWORD` | empty | DCR service account; enables password reset e-mails |
 | `DCR_TIMEOUT` | `15` | seconds per DCR call |
 | `DCR_AUTH_CACHE_SECONDS` | `300` | how long a validated DCR token is cached |
@@ -167,10 +170,55 @@ spec:
   ports:
     - port: 80
       targetPort: 8000
+---
+# Keeps the verification status of submitted activities in sync with DCR
+# (needs DCR_SERVICE_USERNAME / DCR_SERVICE_PASSWORD in the secret)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: operator-api-dcr-sync
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          containers:
+            - name: dcr-sync
+              image: team4gilab/operator-platform-api:v0.1.0
+              # args keep the entrypoint (waits for the database), with its start-up steps off
+              args: ["python", "manage.py", "sync_dcr_status"]
+              env:
+                - {name: RUN_MIGRATIONS, value: "0"}
+                - {name: COLLECT_STATIC, value: "0"}
+                - {name: WARM_DCR_CACHE, value: "0"}
+              envFrom:
+                - configMapRef: {name: operator-api}
+                - secretRef: {name: operator-api}
 ```
+
+The CronJob refreshes the DCR verification status, certificates and audit reports of every
+submitted activity every 15 minutes (`manage.py sync_dcr_status`), so the frontend can read
+`dcr-status` with a plain `GET`. Alternatively run it as a long-lived process with
+`python manage.py sync_dcr_status --every 900`.
 
 ## First steps after deployment
 
 - Create an admin account: `python manage.py createsuperuser` in the API container.
 - Partner API keys: `python manage.py create_partner_key --name <partner>` (the key is printed once).
+- Registry owners (France, legal persons): `python manage.py load_registry_owners` downloads the
+  DGFiP parcel files of the newest known vintage (about 420 MB of zips) and replaces the loaded vintage
+  in one transaction (metropolitan France, about 20 million rows, a few minutes, about 4.5 GB). Run it once after deploying and
+  again each year when DGFiP publishes a new situation (usually in the autumn): add the new file URLs to
+  `FILES` in `apps/parcels/registry.py`, or pass downloaded zips with `--file`. The table is reference
+  data, so `deploy/dm/backup.sh` dumps it without its rows; reload it after a restore.
+  The old vintage's rows are deleted, not truncated (partners keep reading during the load), so run
+  `VACUUM FULL ANALYZE parcels_registryowner` in the database afterwards to give the space back
+  (about 4 min, the table is locked meanwhile).
 - Interactive API documentation: `/api/docs/`. Django admin: `/admin/`.

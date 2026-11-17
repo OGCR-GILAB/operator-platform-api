@@ -97,11 +97,19 @@ class Document(models.Model):
 
     @property
     def is_frozen(self) -> bool:
-        """Documents of a submitted project or a DCR-registered parcel stay as they are."""
+        """
+        No metadata edits or new versions: once forwarded, or when the project/parcel no
+        longer accepts documents (final verdict or certificate; see accepts_documents).
+        """
         if self.forward_status == self.ForwardStatus.FORWARDED:
             return True
-        if self.project_id and not self.project.is_editable:
-            return True
-        if self.parcel_id and self.parcel.is_synced:
-            return True
-        return False
+        return not self.parent.accepts_documents
+
+    @property
+    def is_deletable(self) -> bool:
+        """After submit nothing is deleted, so it stays clear what the certifier could see."""
+        if self.is_frozen:
+            return False
+        if self.project_id:
+            return self.project.submitted_at is None and self.project.is_editable
+        return not self.parcel.is_synced

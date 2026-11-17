@@ -1,3 +1,5 @@
+import logging
+
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.permissions import AllowAny
@@ -11,16 +13,23 @@ from apps.accounts.services import sync_user_from_dcr
 from .authentication import forget_token, remember_token
 from .client import get_client
 from .exceptions import DCRAuthError, DCRError
-from .reference import certification_schemes
+from .reference import certification_schemes, password_policy
+from .roles import capabilities, live_permissions
 from .serializers import (
     CertificationSchemeSerializer,
+    DCRPermissionsSerializer,
     EmailValidationSerializer,
     LoginResponseSerializer,
     LoginSerializer,
+    MobilePhoneSerializer,
+    PasswordPolicySerializer,
     PasswordResetSerializer,
     RegisterResponseSerializer,
     RegisterSerializer,
+    ResendValidationEmailSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class LoginView(APIView):
@@ -105,6 +114,7 @@ class RegisterView(APIView):
             password=data["password"],
             first_name=data["first_name"],
             last_name=data["last_name"],
+            mobile_phone_number=data.get("mobile_phone_number", ""),
         )
         user = sync_user_from_dcr(profile)
         if not user.first_name:
@@ -158,15 +168,160 @@ class PasswordResetView(APIView):
         serializer = PasswordResetSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data["email"]
+        username = serializer.validated_data.get("username") or ""
+        client = get_client()
+        client.service_token()  # a missing service account is a configuration error (503)
+        # DCR needs username, e-mail and the user's id next to each other
+        accounts = _dcr_accounts(client, email, username)
+        if not accounts:
+            logger.info("password reset: no DCR user for the given e-mail")
+        for account in accounts[:MAX_RESET_ACCOUNTS]:
+            try:
+                answer = client.send_password_reset(*account)
+            except DCRAuthError:
+                raise  # service account problem: surface it (503 via the handler is misleading)
+            except DCRError as exc:
+                if exc.status_code not in (400, 404):
+                    raise
+                logger.info("password reset for %s refused by DCR: %s", account[0], exc)
+            else:
+                status_ = answer.get("status") if isinstance(answer, dict) else answer
+                logger.info("password reset for %s: DCR answered %s", account[0], status_)
+        return Response(PASSWORD_RESET_SENT, status=status.HTTP_202_ACCEPTED)
+
+
+PASSWORD_RESET_SENT = {"detail": "If the account exists, DCR has sent a password reset e-mail."}
+MAX_RESET_ACCOUNTS = 3  # one e-mail address can belong to several DCR usernames
+
+
+def _dcr_accounts(client, email: str, username: str) -> list[tuple[str, str, str]]:
+    """
+    (username, e-mail, user id) of the DCR users with this e-mail, and this username when
+    given. Looked up on DCR (CanGetAnyUser); if that is not possible, from the users who
+    registered or signed in here.
+    """
+    try:
+        users = client.users_by_email(email)
+    except DCRAuthError:
+        raise
+    except DCRError as exc:
+        if exc.status_code == 404:
+            return []
+        logger.warning("password reset: DCR user lookup failed (%s), using local users", exc)
+        return _local_accounts(email, username)
+    accounts = []
+    for user in users:
+        name, address, user_id = user.get("username"), user.get("email"), user.get("user_id")
+        if not (name and user_id) or (address or "").lower() != email.lower():
+            continue
+        if username and name.lower() != username.lower():
+            continue
+        accounts.append((name, address, user_id))
+    return accounts
+
+
+def _local_accounts(email: str, username: str) -> list[tuple[str, str, str]]:
+    """The local mirror of DCR users by e-mail (and username when given), latest sign-in first."""
+    from apps.accounts.models import User
+
+    users = User.objects.exclude(dcr_user_id__isnull=True).exclude(dcr_user_id="")
+    users = users.filter(email__iexact=email)
+    if username:
+        users = users.filter(username__iexact=username)
+    return [(u.username, u.email or email, u.dcr_user_id) for u in users.order_by("-last_login")]
+
+
+class ResendValidationEmailView(APIView):
+    """
+    Ask DCR to send the e-mail validation link again (DCR v7.0.0+). Always answers 202,
+    so account existence is not leaked.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_reset"
+
+    @extend_schema(request=ResendValidationEmailSerializer, responses={202: None})
+    def post(self, request):
+        serializer = ResendValidationEmailSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
         username = serializer.validated_data.get("username") or email
         try:
-            get_client().send_password_reset(username, email)
+            get_client().resend_validation_email(username, email)
         except DCRAuthError:
-            raise  # service account problem: surface it (503 via the handler is misleading)
+            raise
         except DCRError as exc:
             if exc.status_code not in (400, 404):
                 raise
         return Response(
-            {"detail": "If the account exists, DCR has sent a password reset e-mail."},
+            {"detail": "If an unvalidated account exists, DCR has sent a new validation e-mail."},
             status=status.HTTP_202_ACCEPTED,
         )
+
+
+class PasswordPolicyView(APIView):
+    """The password rules DCR enforces at registration (cached). Public."""
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(responses={200: PasswordPolicySerializer, 503: None})
+    def get(self, request):
+        policy = password_policy()
+        if policy is None:
+            return Response(
+                {"detail": "DCR password policy is currently unavailable"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(policy)
+
+
+class DCRPermissionsView(APIView):
+    """
+    The DCR roles the platform needs, checked one by one on DCR (bank-level roles at
+    DCR_BANK_ID), and what they allow: submit, status (verification results) and
+    reference data. Cached for 5 minutes; `?refresh=1` checks again. Falls back to the
+    login-time role list (`source: "profile"`) when DCR cannot answer.
+    """
+
+    @extend_schema(responses={200: DCRPermissionsSerializer})
+    def get(self, request):
+        token = request.auth if isinstance(request.auth, str) else None
+        result = None
+        if token:
+            refresh = request.query_params.get("refresh") in ("1", "true")
+            result = live_permissions(token, use_cache=not refresh)
+        if result is not None:
+            return Response({"source": "live", **result})
+        from django.conf import settings
+
+        return Response(
+            {
+                "source": "profile",
+                "bank_id": settings.DCR.get("BANK_ID") or "",
+                "checked_at": None,
+                "roles": [],
+                "capabilities": capabilities(request.user.dcr_profile or {}),
+            }
+        )
+
+
+class MobilePhoneView(APIView):
+    """Set the user's mobile phone number on DCR (DCR v7.0.0+) and return the refreshed user."""
+
+    @extend_schema(request=MobilePhoneSerializer, responses={200: MeSerializer})
+    def put(self, request):
+        serializer = MobilePhoneSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        token = request.auth if isinstance(request.auth, str) else None
+        if not token:
+            return Response(
+                {"detail": "A DCR token is required", "code": "dcr_auth_failed"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        client = get_client()
+        client.update_mobile_phone_number(token, serializer.validated_data["mobile_phone_number"])
+        user = sync_user_from_dcr(client.current_user(token))
+        return Response(MeSerializer(user).data)

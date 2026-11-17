@@ -19,6 +19,7 @@ class Project(DCRSyncedModel):
         DRAFT = "draft", "Draft"
         READY = "ready", "Ready for submission"
         SUBMITTED = "submitted", "Submitted to DCR"
+        CHANGES_REQUESTED = "changes_requested", "Changes requested by the certifier"
         ACCEPTED = "accepted", "Accepted by DCR"
         REJECTED = "rejected", "Rejected by DCR"
 
@@ -27,7 +28,7 @@ class Project(DCRSyncedModel):
         CARBON_STORAGE_IN_PRODUCTS = "CARBON_STORAGE_IN_PRODUCTS", "Carbon storage in products"
         PERMANENT_REMOVAL = "PERMANENT_REMOVAL", "Permanent carbon removal"
 
-    EDITABLE_STATUSES = (Status.DRAFT, Status.READY)
+    EDITABLE_STATUSES = (Status.DRAFT, Status.READY, Status.CHANGES_REQUESTED)
 
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="projects"
@@ -43,9 +44,15 @@ class Project(DCRSyncedModel):
     website = models.URLField(blank=True)
     image = models.URLField(blank=True)
     hero_image = models.URLField(blank=True)
-    media_links = models.JSONField(default=list, blank=True, help_text="List of URLs")
+    media_links = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="URLs, or objects {link, title, type, author, published_date, image}",
+    )
     technologies_practices_processes = models.JSONField(
-        default=list, blank=True, help_text="List of practice/process identifiers"
+        default=list,
+        blank=True,
+        help_text="DCR technologies_practices_processes ids (free text is kept but not linked)",
     )
     type = models.CharField(
         max_length=40, choices=ActivityType.choices, default=ActivityType.CARBON_FARMING
@@ -62,7 +69,12 @@ class Project(DCRSyncedModel):
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
     term_commitment = models.PositiveIntegerField(null=True, blank=True, help_text="Years")
-    cobenefits = models.JSONField(default=list, blank=True)
+    cobenefits = models.JSONField(
+        default=list, blank=True, help_text="DCR co_benefit ids (free text is kept but not linked)"
+    )
+    sustainable_development_goals = models.JSONField(
+        default=list, blank=True, help_text="DCR sustainable_development_goal ids"
+    )
     methodologies = models.TextField(blank=True)
     monitoring_period_years = models.PositiveIntegerField(null=True, blank=True)
     monitoring_period_start_date = models.DateField(null=True, blank=True)
@@ -73,6 +85,26 @@ class Project(DCRSyncedModel):
     # --- verification outcome mirrored from DCR (see services.refresh_dcr_status)
     dcr_verification = models.JSONField(
         default=dict, blank=True, help_text="Latest activity_verification record from DCR"
+    )
+    dcr_links = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="DCR ids of the link records created on submit, per link entity and value",
+    )
+    dcr_amendment_answered = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="The amendment request (verification record) the last resubmit answered",
+    )
+    dcr_certificates = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="certificate_of_compliance records of the activity on DCR, newest first",
+    )
+    dcr_audit_reports = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="audit_report records of the activity on DCR, newest first",
     )
     dcr_status_checked_at = models.DateTimeField(null=True, blank=True)
 
@@ -93,6 +125,22 @@ class Project(DCRSyncedModel):
     @property
     def is_editable(self) -> bool:
         return self.status in self.EDITABLE_STATUSES
+
+    @property
+    def accepts_documents(self) -> bool:
+        """
+        Documents stay on this platform and certifiers fetch them during the audit, so they
+        can be added (or get new versions) after submit, until the verdict is final or a
+        certificate is in force.
+        """
+        if self.status in (self.Status.ACCEPTED, self.Status.REJECTED):
+            return False
+        if (self.dcr_verification or {}).get("status_code") in reference.FINAL_VERDICTS:
+            return False
+        return not any(
+            c.get("certification_status") in ("certified", "active")
+            for c in self.dcr_certificates or []
+        )
 
 
 class ActivityPlan(DCRSyncedModel):

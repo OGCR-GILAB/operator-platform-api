@@ -1,6 +1,14 @@
 import uuid
 
+from django.conf import settings
 from django.db import models
+
+
+def new_dcr_id(prefix: str) -> str:
+    """`<prefix>_<random>`, behind DCR_ID_PREFIX when one is set (test setups)."""
+    dcr_id = f"{prefix}_{uuid.uuid4().hex[:24]}"
+    common = settings.DCR.get("ID_PREFIX")
+    return f"{common}_{dcr_id}" if common else dcr_id
 
 
 class DCRSyncedModel(models.Model):
@@ -31,7 +39,11 @@ class DCRSyncedModel(models.Model):
         return bool(self.dcr_id) and self.dcr_sync_status == self.SyncStatus.SYNCED
 
     def ensure_dcr_id(self, prefix: str) -> str:
-        """DCR expects the client to supply entity ids; generate one once and keep it."""
+        """
+        DCR expects the client to supply entity ids; generate one once and keep it.
+        DCR_ID_PREFIX (empty in production) marks ids from a test setup, e.g.
+        `OPP-TEST_act_...`, so a partner test instance can pick out its records.
+        """
         if not self.dcr_id:
-            self.dcr_id = f"{prefix}_{uuid.uuid4().hex[:24]}"
+            self.dcr_id = new_dcr_id(prefix)
         return self.dcr_id

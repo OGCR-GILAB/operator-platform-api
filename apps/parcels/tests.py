@@ -116,3 +116,109 @@ class ProjectParcelLinkTests(ParcelBase):
         self.assertEqual(
             self.client.post(url, {"parcel": other.pk}, format="json").status_code, 400
         )
+
+
+class RegistryOwnersTests(ParcelBase):
+    def setUp(self):
+        super().setUp()
+        from .models import RegistryOwner
+
+        self.parcel = Parcel.objects.create(
+            operator=self.operator,
+            cadastral_reference="45025000ZA0093",
+            geometry="SRID=4326;MULTIPOLYGON(((1 47,1.01 47,1.01 47.01,1 47)))",
+        )
+        self.url = reverse("parcel-registry-owners", args=[self.parcel.pk])
+        common = {"idu": "45025000ZA0093", "vintage": 2026, "right_label": ""}
+        RegistryOwner.objects.create(
+            **common,
+            right_code="P",
+            legal_name="GFA DES VARENNES",
+            legal_form="GFA",
+            person_group="Personnes morales non remarquables",
+        )
+        RegistryOwner.objects.create(
+            **common, right_code="G", legal_name="COMMUNE DE BAZOCHES", person_group="Commune"
+        )
+
+    def test_registry_owners_with_suggestion_and_match(self):
+        from .models import ParcelOwner
+
+        body = self.client.get(self.url).json()
+        self.assertEqual(body["vintage"], 2026)
+        self.assertEqual(
+            [(o["legal_name"], o["suggested_owner_type"]) for o in body["owners"]],
+            [("COMMUNE DE BAZOCHES", "public_entity"), ("GFA DES VARENNES", "legal_person")],
+        )
+        self.assertIsNone(body["matches_declared"])
+
+        owner = ParcelOwner.objects.create(
+            parcel=self.parcel,
+            legal_name="Gfa des Varennes.",
+            owner_type="legal_person",
+            country_code="FR",
+        )
+        self.assertTrue(self.client.get(self.url).json()["matches_declared"])
+        # only owners (right P) count, not a manager
+        owner.legal_name = "Commune de Bazoches"
+        owner.save()
+        self.assertFalse(self.client.get(self.url).json()["matches_declared"])
+
+    def test_no_registry_data(self):
+        other = Parcel.objects.create(
+            operator=self.operator,
+            cadastral_reference="DE-123",
+            geometry="SRID=4326;MULTIPOLYGON(((1 47,1.01 47,1.01 47.01,1 47)))",
+        )
+        url = reverse("parcel-registry-owners", args=[other.pk])
+        self.assertEqual(self.client.get(url).status_code, 404)
+        foreign = Parcel.objects.create(
+            operator=self.foreign,
+            cadastral_reference="45025000ZA0093",
+            geometry="SRID=4326;MULTIPOLYGON(((1 47,1.01 47,1.01 47.01,1 47)))",
+        )
+        url = reverse("parcel-registry-owners", args=[foreign.pk])
+        self.assertEqual(self.client.get(url).status_code, 404)  # another operator's parcel
+
+    def test_list_rows_carry_owner_completeness_and_registry_match(self):
+        from .models import ParcelOwner
+
+        project = Project.objects.create(owner=self.user, operator=self.operator, name="P")
+        ProjectParcel.objects.create(project=project, parcel=self.parcel)
+        plain = Parcel.objects.create(
+            operator=self.operator,
+            cadastral_reference="45025000ZA0076",
+            geometry="SRID=4326;MULTIPOLYGON(((1 47,1.01 47,1.01 47.01,1 47)))",
+        )
+
+        def rows():
+            return {r["id"]: r for r in self.client.get(reverse("parcel-list")).json()["results"]}
+
+        row = rows()[self.parcel.pk]
+        self.assertIsNone(row["owner_is_complete"])
+        self.assertIsNone(row["registry_match"])
+        ParcelOwner.objects.create(
+            parcel=self.parcel,
+            legal_name="GFA des Varennes",
+            owner_type="legal_person",
+            country_code="FR",
+        )
+        ParcelOwner.objects.create(
+            parcel=plain, legal_name="J. Dupont", owner_type="natural_person", country_code="FR"
+        )
+        found = rows()
+        self.assertFalse(found[self.parcel.pk]["owner_is_complete"])  # no deed yet
+        self.assertTrue(found[self.parcel.pk]["registry_match"])
+        self.assertIsNone(found[plain.pk]["registry_match"])  # no legal-person owner to compare
+        links = self.client.get(reverse("project-parcels", args=[project.pk])).json()
+        self.assertTrue(links[0]["parcel_detail"]["registry_match"])
+        self.assertFalse(links[0]["parcel_detail"]["owner_is_complete"])
+
+    def test_overseas_parcels_are_not_covered(self):
+        overseas = Parcel.objects.create(
+            operator=self.operator,
+            cadastral_reference="97101000CR0087",
+            geometry="SRID=4326;MULTIPOLYGON(((1 47,1.01 47,1.01 47.01,1 47)))",
+        )
+        url = reverse("parcel-registry-owners", args=[overseas.pk])
+        self.assertEqual(self.client.get(url).status_code, 404)

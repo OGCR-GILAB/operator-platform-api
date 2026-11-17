@@ -1,6 +1,6 @@
 # Frontend integration guide (v4)
 
-Version 4, 2026-09-23. Previous: v3 (2026-09-18).
+Version 4, 2026-09-23, with addenda of 2026-09-24, 2026-10-12, 2026-10-14, 2026-10-20, 2026-10-28, 2026-11-12 (two) and 2026-11-13. Previous: v3 (2026-09-18).
 
 ## What changed since v3 (action needed)
 
@@ -41,6 +41,177 @@ Unchanged: all endpoints, auth, readiness, dcr-status, documents, parcels, refer
 - The sheet also introduces vocabularies for co-benefits, practices and SDGs, an `activity_media`
   entity and `supporting_document` entities; the API will expose them once DCR declares them
   (separate announcement).
+
+### Addendum 2026-10-12 (DCR API v7.0.0)
+
+The API now calls DCR **v7.0.0** and the bank-level entity model (`banks/ogcr`). Existing endpoints
+and response shapes are unchanged; the items below are additions.
+
+1. **DCR account card.** `GET auth/me/` -> `dcr` has new fields: `api_version` (`"v7.0.0"`),
+   `bank_id` (`"ogcr"`), `mobile_phone_number`, `mobile_phone_number_is_validated`. Roles granted at
+   `bank_id` now count (they are listed in `roles`); `bank_scoped_roles` still lists every grant per
+   bank, so only grants at *other* banks are worth flagging.
+2. **Vocabularies from DCR.** `GET reference/vocabularies/` (public) returns `countries`,
+   `sustainable_development_goals` (with an `icon` URL), `technologies_practices_processes` and
+   `co_benefits`, each a list of `{value, label}`, plus `sources` per list (`dcr`, `local` fallback,
+   or `unavailable`). `value` is the DCR id to store, e.g. `AGROFORESTRY`. `GET reference/countries/`
+   keeps its `{code, name}` shape but now comes from DCR (249 entries). Use these lists for the
+   practices and co-benefits selects instead of the example values; `co_benefits` currently holds only
+   a DCR placeholder (`sample`), so keep free text there until DCR fills it.
+3. **Live permission check.** `GET auth/dcr/permissions/` checks each needed role on DCR and returns
+   `{source, bank_id, checked_at, roles[], capabilities}`; `capabilities.submit|status|reference` has
+   `allowed`, `missing_roles`, `unknown_roles`. Cached 5 minutes, `?refresh=1` re-checks.
+   `source: "profile"` means DCR could not answer and the login-time role list was used.
+   Readiness gains a `dcr.roles` warning when submit roles are missing, and **submit now answers
+   `403`** `{detail, step: "permissions", bank_id, missing_roles[]}` *before* writing anything to DCR.
+4. **Password rules.** `GET auth/password-policy/` (public) returns DCR's rules:
+   `{description, policies: [{description, min_length, max_length, required_character_classes: [{name, regex}], regex}]}`.
+   A password is valid when it matches **any one** policy. Show `description` under the field and
+   validate as the user types; `POST auth/register/` now rejects a weak password with `400` on
+   `password` before calling DCR. `503` when DCR cannot report the policy (then just let the user
+   submit; DCR still checks).
+5. **Resend the validation e-mail.** `POST auth/resend-validation-email/` `{email, username?}`
+   (public, rate limited) -> always `202`. Offer it on the "check your inbox" screen and when login
+   fails because the e-mail is not validated.
+6. **Mobile phone.** `POST auth/register/` accepts optional `mobile_phone_number` in international
+   format (`+33 6 12 34 56 78`). A logged-in user can set it with `PUT auth/me/mobile-phone/`
+   `{mobile_phone_number}`, which returns the refreshed `me`. `400` on a malformed number.
+
+### Addendum 2026-11-13 (registry owners next to the declared owner)
+
+The certification platform asked for the owner known to the land registry next to the owner the
+operator declares, so the auditor can compare the two. For French parcels we hold the DGFiP open file
+of parcels with a right held by a **legal person** (companies, GAEC/GFA/SCI, municipalities, the
+State, ...; metropolitan France, situation on 1 January 2026). Owners who are natural persons are not
+published by the registry.
+
+- `GET /api/parcels/{id}/registry-owners/` returns
+  `{source, source_url, vintage, coverage, cadastral_reference, owners, matches_declared}`;
+  `404` when the parcel has no French cadastral reference (or no registry is loaded).
+- `owners[]`: `{legal_name, siren, legal_form, person_group, right_code, right_label,
+  suggested_owner_type}`. `right_code` `P` is the owner; others are rights next to it (`U`
+  usufructuary, `N` bare owner, `G` manager, ...). `suggested_owner_type` is `legal_person` or
+  `public_entity`, ready for the declaration form.
+- `matches_declared`: `true` when the declared owner's name is one of the registry owners (`P`),
+  compared without case, accents or punctuation; `false` when it is not; `null` when there is nothing
+  to compare (no declaration yet, or no legal-person owner in the registry).
+- An empty `owners` list is normal for most farmland (private owners) and is not an error.
+- Parcels outside metropolitan France (no French cadastral reference, or overseas departments) get
+  `404`: the registry does not cover them, so hide the section.
+- Parcel rows (`/api/parcels/` and `parcel_detail` in an activity's parcel links) carry
+  `owner_is_complete` (`true`/`false`, `null` while nothing is declared) and `registry_match` (the same
+  value as `matches_declared`, computed once per response), so the table needs no extra calls.
+
+### Addendum 2026-11-12b (declared parcel owner)
+
+DCR has a new `parcel_owner` record: the owner **as declared by the operator**, with the deed or
+cadastre extract it rests on. The certifier then verifies it (`parcel_owner_verification`, read-only
+for us as before). We write the declaration; the frontend needs a small form per parcel.
+
+- `GET /api/parcels/{id}/owner/` returns the declaration, `404` while there is none.
+- `PUT` (or `PATCH`) the same URL with
+  `{legal_name, owner_type, country_code, document}`:
+  - `owner_type`: `natural_person`, `legal_person` or `public_entity`
+  - `country_code`: ISO 3166-1 alpha-2 of the owner's address (same list as `reference/countries/`)
+  - `document`: id of a **current** document uploaded **to this parcel** (normally kind
+    `ownership_proof` or `cadastral_extract`); `null` is accepted while drafting.
+- Response: the fields above plus `document_title`, `is_complete`, `dcr_id`, `dcr_sync_status`.
+- Editable until the parcel's verification is final (`409` after that), also after submit.
+- It reaches DCR once the certification platform has registered the parcel (within minutes after
+  submit; the status refresh does it). A change after that is sent immediately, as an update.
+  So `dcr_sync_status` reads `local` until then: show it as "waiting for registration", not as an error.
+- Parcel list rows have `has_owner`. Readiness warns per linked parcel without a complete declaration
+  (`parcel.<id>.owner`, a warning, not a blocker).
+- `dcr-status` parcels carry `owner`: `{legal_name, owner_type, country_code, document, is_complete,
+  dcr_id, dcr_sync_status, error}`; `error` is set when sending failed.
+
+### Addendum 2026-11-12 (DCR schema changes)
+
+- **Every parcel needs a cadastral reference.** DCR now requires `cadastral_reference` on parcels, so
+  readiness reports an error per parcel without one (`parcel.<id>.cadastral_reference`). Parcels picked
+  from the cadastre have it; parcels drawn by hand must get it typed in.
+- **Parcels are registered on DCR by the certification platform, not by us.** Submit sends the
+  operator, activity, plans and links; the certification platform reads the activity's parcels (with
+  cadastral references and documents) from our partner API and writes `parcel` and `parcel_activity`
+  itself, under its own ids. The activity boundary sent on submit is the drawn geometry or, if none was
+  drawn, the outline of the linked parcels.
+- **A parcel's `dcr_id` and `dcr_sync_status`** are filled in by the status refresh once the
+  certification platform has registered it (matched by cadastral reference). Until then a parcel of a
+  submitted activity shows `local`; do not present that as an error ("waiting for registration").
+- Unlinking a parcel from an activity reopened for amendment only changes it here; the certification
+  platform updates its links on DCR.
+- **Activities that disappear from DCR** (e.g. a registry reset) are noticed by the status sync: the
+  activity goes back to `ready`, its mirrored verdicts are cleared, and the operator can submit it again
+  with the same ids.
+- SDG links are written to DCR's new `activity_sustainable_development_goal` entity (nothing changes in
+  the API). DCR is renaming plural entities to singular ones; the backend picks whichever name DCR
+  declares, so nothing changes for the frontend.
+
+### Addendum 2026-10-28 (amendment requests)
+
+The certification platform can now ask the operator to change a submitted activity, at validation
+(`validation_amendment_required`) or at verification (`verification_amendment_required`).
+
+- The activity then gets **status `changes_requested`** (picked up by the 15-minute sync or a
+  `POST dcr-status`). `dcr-status` has an `amendment` block while it lasts:
+  `{stage: "validation" | "verification", status_code, message}`; `message` is what the certifier
+  wrote. Show it prominently on the activity, with a call to action.
+- In `changes_requested` the activity is **editable again** (`is_editable: true`): details, plans,
+  parcels (link and unlink) and documents (upload, new versions; no deletes after the first submit).
+- The operator resubmits with the usual `POST submit/` (no "mark ready" step). The same DCR records are
+  updated; parcels removed from the activity also lose their link on DCR. The status returns to
+  `submitted` and the request counts as answered until the certifier acts again.
+- `submitted_at` keeps the date of the first submit.
+
+### Addendum 2026-10-20 (vocabulary links, media, automatic status sync)
+
+- **New project field `sustainable_development_goals`**: a list of DCR ids from
+  `GET reference/vocabularies/` -> `sustainable_development_goals` (17 values, each with an `icon`).
+  Offer it as a multi-select next to practices and co-benefits.
+- **Practices, co-benefits and SDGs reach DCR as links on submit.** Values that are DCR vocabulary
+  ids become link records on DCR; other (free text) values are kept on the project and sent only as
+  text. Readiness reports them as a warning with code `<field>.vocabulary`, e.g.
+  `technologies_practices_processes.vocabulary`. All three fields must be lists of strings (`400`
+  otherwise); duplicates are removed.
+- **`media_links` items can be objects**: `{link, title?, type?, author?, published_date?, image?}`
+  (`link` and `image` URLs, `published_date` `YYYY-MM-DD`); plain URL strings still work. Each item is
+  sent to DCR as an `activity_media` record (type `link` and the URL as title when not given).
+- **`dcr-status` refreshes itself.** The server re-reads the verification, certificates and audit
+  reports of every submitted activity every 15 minutes, so a plain `GET projects/{id}/dcr-status/`
+  is enough on page load; keep `POST` for an explicit "refresh now" button. `checked_at` tells how old
+  the data is.
+
+- **`dcr-status` -> `parcels[]`** also has `name`, `cadastral_reference` and `has_verdict`:
+  `true` only when the certifier recorded a verdict for that parcel itself. Today the certification
+  platform verifies per activity (`parcel_id` empty), so parcels show `has_verdict: false` and the
+  activity's `verification` applies to them. Verification statuses now include `validated`.
+
+- **Documents after submit.** Uploads and new versions are accepted after submit until the
+  verification is final (`verified`/`failed`) or a certificate is in force; documents then have
+  `is_frozen: true`. Deleting is refused (`409`) once the activity is submitted; each document has
+  `is_deletable` to hide the delete action. Uploading to a closed activity or parcel gives `400`.
+
+- **Verification status codes** (as the certification platform writes them): `draft`,
+  `under_review`, `validated`, `denied` (failed at validation), `in_progress`, `verified`, `failed`.
+  `denied` and `failed` move the activity to `rejected`, `verified` to `accepted`. Two more are
+  coming: `validation_amendment_required` and `verification_amendment_required`.
+
+### Addendum 2026-10-14 (certificates and audit reports)
+
+The certification platform now writes its results to DCR. `GET|POST projects/{id}/dcr-status/` returns,
+next to `verification` and `parcels`:
+
+- `certificate`: the newest certificate of compliance with `certification_status` `certified` or
+  `active` (or `null`). Worth showing on the project: status, `issue_date`, `expiry_date`,
+  `unit_types` and the benefit amounts (`permanent_net_carbon_removal_benefit`,
+  `carbon_farming_net_soil_emission_reduction_benefit`, ...).
+- `certificates`: all certificates, newest first (`expired` / `suspended` ones included, for history).
+- `audit_reports`: audit reports, newest first (`audit_date`, `audit_report_issue_date`,
+  `audit_report_summary`, `non_conformities_list`, `certification_body_id`, ...).
+
+These are DCR's own records, passed through unchanged; many fields can be `null`. Verification
+`status_code` values now also include `pending` and `under_review` (both keep the project `submitted`);
+`GET reference/` lists them in `verification_statuses`.
 
 ## DCR data available to show right now
 
@@ -117,7 +288,7 @@ record exposes `dcr_id`, `dcr_sync_status` (`local` / `synced` / `failed`) and `
 8. **Submit**: `POST projects/{id}/submit/`. Success returns the project with `status: "submitted"`
    and DCR ids. `400` returns `{detail, problems[]}` (same as readiness errors). `502` returns
    `{detail, step}` where `step` names the DCR entity that failed (`operator`, `activity`,
-   `activity_plan`, `parcel`, ...); the project stays editable and can be resubmitted.
+   `activity_plan`, `monitoring_plan`, ...); the project stays editable and can be resubmitted.
    After submit the project, its plans, parcels and documents are read-only (`409` on changes).
 
 9. **After submit**: `GET projects/{id}/dcr-status/` shows the last known outcome; `POST` the same URL to
@@ -132,8 +303,9 @@ Project lifecycle: `draft -> ready -> submitted -> accepted | rejected`
 `GET reference/` returns the vocabularies to use in selects: activity types, unit types (with the
 activity type each implies), project and verification statuses, document kinds, example practices and
 co-benefits (free text is accepted for those two until DCR publishes a list), and the document limits.
-`GET reference/countries/` lists ISO 3166-1 alpha-2 codes with names; `country_code` fields are
-validated against it.
+`GET reference/countries/` lists ISO 3166-1 alpha-2 codes with names (from DCR, built-in list as a
+fallback); `country_code` fields are validated against it. `GET reference/vocabularies/` returns the
+DCR vocabularies (countries, SDGs, practices, co-benefits); see the 2026-10-12 addendum.
 
 ## Geometry
 
@@ -153,6 +325,7 @@ List endpoints accept `?search=`, `?ordering=field` / `-field`, and field filter
 |---|---|
 | 400 | validation error (field map) or DCR rejected the data (`dcr_rejected`) |
 | 401 | not logged in / token expired / wrong DCR credentials |
+| 403 | submit refused before any DCR write: the DCR account lacks roles (`missing_roles`) |
 | 404 | not found or not yours |
 | 409 | not allowed in the current state (submitted project, last operator member, ...) |
 | 502 | DCR returned an error during submit (`step` says where) |

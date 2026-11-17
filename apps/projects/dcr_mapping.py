@@ -25,7 +25,29 @@ def _json_list(values) -> str | None:
 
 
 def _csv(values) -> str | None:
-    return ",".join(str(v) for v in values) if values else None
+    values = [str(v) for v in values if v]
+    return ",".join(values) if values else None
+
+
+def media_link(item) -> str:
+    """media_links items are URLs or objects with `link`."""
+    return item.get("link", "") if isinstance(item, dict) else str(item)
+
+
+def activity_media_payload(project, item, media_id: str) -> dict:
+    entry = item if isinstance(item, dict) else {"link": item}
+    return _clean(
+        {
+            "activity_media_id": media_id,
+            "activity_id": project.dcr_id,
+            "activity_media_type": entry.get("type") or "link",
+            "title": entry.get("title") or entry["link"],
+            "link": entry["link"],
+            "author": entry.get("author"),
+            "published_date": entry.get("published_date"),
+            "image": entry.get("image"),
+        }
+    )
 
 
 def _num(value):
@@ -85,8 +107,30 @@ def membership_payload(membership) -> dict:
     )
 
 
+def activity_boundary(project):
+    """
+    The activity's own boundary, or, when none was drawn, the outline of its linked parcels
+    (the certification platform finds parcels by the activity geometry). None without either.
+    """
+    if project.geometry:
+        return project.geometry
+    from django.contrib.gis.geos import MultiPolygon
+
+    shapes = [link.parcel.geometry for link in project.parcel_links.select_related("parcel")]
+    shapes = [g for g in shapes if g]
+    if not shapes:
+        return None
+    union = shapes[0]
+    for shape in shapes[1:]:
+        union = union.union(shape)
+    if union.geom_type == "Polygon":
+        union = MultiPolygon(union, srid=union.srid)
+    return union
+
+
 def activity_payload(project) -> dict:
-    geometry = json.loads(project.geometry.geojson) if project.geometry else None
+    boundary = activity_boundary(project)
+    geometry = json.loads(boundary.geojson) if boundary else None
     plan = getattr(project, "plan", None)
     return _clean(
         {
@@ -96,7 +140,7 @@ def activity_payload(project) -> dict:
             "website": project.website,
             "image": project.image,
             "hero_image": project.hero_image,
-            "media_links": _csv(project.media_links),
+            "media_links": _csv(media_link(m) for m in project.media_links),
             "operator_id": project.operator.dcr_id if project.operator else None,
             "technologies_practices_processes": _json_list(
                 project.technologies_practices_processes
@@ -130,7 +174,8 @@ def activity_plan_payload(plan) -> dict:
             "activity_id": plan.project.dcr_id,
             "date_submitted": _iso(plan.date_submitted or date.today()),
             "activity_eligibility": plan.activity_eligibility,
-            "legal_parcel_ownership": plan.legal_parcel_ownership,
+            # not sent: on DCR this is a reference to a parcel_owner_verification record,
+            # which the certification platform creates; the operator's text stays local
             "coordinate_reference_system": plan.coordinate_reference_system,
             "iacs_codes": _csv(plan.iacs_codes),
             "lpis_codes": _csv(plan.lpis_codes),
@@ -182,8 +227,58 @@ def parcel_payload(parcel) -> dict:
         {
             "multipolygon_coordinates": json.loads(parcel.geometry.geojson),
             "coordinate_reference_system": "EPSG:4326",
+            # national cadastral registry id (required on DCR), e.g. French IDU 45025000ZA0090
+            "cadastral_reference": parcel.cadastral_reference,
             "iacs_codes": _csv(parcel.iacs_codes),
             "lpis_codes": _csv(parcel.lpis_codes),
+        }
+    )
+
+
+def supporting_document_url(document) -> str:
+    """The partner download URL of a document (what the certification platform fetches)."""
+    from django.conf import settings
+    from django.urls import reverse
+
+    if not settings.PUBLIC_API_URL:
+        return ""
+    return settings.PUBLIC_API_URL + reverse("partner-document-download", args=[document.pk])
+
+
+def supporting_document_id(document) -> str:
+    """
+    `<prefix>_sd_<sha256 of the partner download URL>`, the scheme the certification
+    platform uses for our documents, so both platforms arrive at the same record.
+    """
+    import hashlib
+
+    from django.conf import settings
+
+    key = supporting_document_url(document) or f"document:{document.pk}:{document.sha256}"
+    common = settings.DCR.get("ID_PREFIX")
+    digest = hashlib.sha256(key.encode()).hexdigest()
+    return f"{common}_sd_{digest}" if common else f"sd_{digest}"
+
+
+def supporting_document_payload(document) -> dict:
+    return _clean(
+        {
+            "supporting_document_id": supporting_document_id(document),
+            "title": document.title,
+            "url": supporting_document_url(document),
+            "sha256_of_document": document.sha256,
+        }
+    )
+
+
+def parcel_owner_payload(owner, parcel_dcr_id: str, document_dcr_id: str) -> dict:
+    return _clean(
+        {
+            "parcel_id": parcel_dcr_id,
+            "legal_name": owner.legal_name,
+            "owner_type": owner.owner_type,
+            "country_id": owner.country_code,
+            "supporting_document_id": document_dcr_id,
         }
     )
 

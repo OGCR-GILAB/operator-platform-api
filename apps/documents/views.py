@@ -14,7 +14,8 @@ from apps.core.exceptions import Conflict
 from .models import Document
 from .serializers import DocumentSerializer, DocumentVersionSerializer, sha256_of
 
-FROZEN = "Document is frozen (submitted project, registered parcel or forwarded)"
+FROZEN = "Document is frozen (final verdict or certificate on DCR, or forwarded)"
+NOT_DELETABLE = "Documents cannot be deleted after submission; upload a new version instead"
 
 
 class DocumentViewSet(viewsets.ModelViewSet):
@@ -60,6 +61,8 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         if instance.is_frozen:
             raise Conflict(FROZEN)
+        if not instance.is_deletable:
+            raise Conflict(NOT_DELETABLE)
         if hasattr(instance, "superseded_by"):
             raise Conflict("Older versions cannot be deleted; delete the current version instead")
         with transaction.atomic():

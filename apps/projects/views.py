@@ -81,7 +81,7 @@ class ProjectViewSet(OneToOneSubresourceMixin, viewsets.ModelViewSet):
     def parcels(self, request, pk=None):
         """GET the parcels linked to the project; POST {parcel, status_message?} links one."""
         project = self.get_object()
-        links = project.parcel_links.select_related("parcel", "parcel__operator")
+        links = project.parcel_links.select_related("parcel", "parcel__operator", "parcel__owner")
         if request.method == "GET":
             return Response(ProjectParcelSerializer(links, many=True).data)
         if not project.is_editable:
@@ -102,8 +102,8 @@ class ProjectViewSet(OneToOneSubresourceMixin, viewsets.ModelViewSet):
         link = project.parcel_links.filter(parcel_id=parcel_id).first()
         if link is None:
             return Response(status=status.HTTP_404_NOT_FOUND)
-        if link.is_synced:
-            raise Conflict("Link is already registered on DCR")
+        # a link already on DCR may go too (e.g. when the certifier asks to drop a parcel):
+        # the next submit deletes its parcel_activity record there
         link.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -144,8 +144,12 @@ class ProjectViewSet(OneToOneSubresourceMixin, viewsets.ModelViewSet):
     @extend_schema(responses={200: ReadinessSerializer})
     @action(detail=True, methods=["get"])
     def readiness(self, request, pk=None):
-        """Submission checklist: blocking errors and non-blocking warnings."""
-        return Response(services.readiness(self.get_object()))
+        """
+        Submission checklist: blocking errors and non-blocking warnings. With a DCR token
+        it also checks (live, cached 5 min) that the DCR account holds the roles to submit.
+        """
+        dcr_token = request.auth if isinstance(request.auth, str) else None
+        return Response(services.readiness(self.get_object(), dcr_token=dcr_token))
 
     @extend_schema(request=None, responses={200: ProjectSerializer})
     @action(detail=True, methods=["post"])
@@ -162,6 +166,7 @@ class ProjectViewSet(OneToOneSubresourceMixin, viewsets.ModelViewSet):
         responses={
             200: ProjectSerializer,
             400: SubmissionErrorSerializer,
+            403: SubmissionErrorSerializer,
             502: SubmissionErrorSerializer,
         },
     )
@@ -175,6 +180,16 @@ class ProjectViewSet(OneToOneSubresourceMixin, viewsets.ModelViewSet):
             return Response(
                 {"detail": "Project is not ready for submission", "problems": exc.problems},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+        except services.MissingDCRRoles as exc:
+            return Response(
+                {
+                    "detail": "Your DCR account is missing roles needed to submit",
+                    "step": "permissions",
+                    "bank_id": exc.bank_id,
+                    "missing_roles": exc.missing_roles,
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
         except services.SubmitError as exc:
             error = BadGateway({"detail": exc.detail, "step": exc.step})

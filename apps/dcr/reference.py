@@ -89,8 +89,13 @@ def certification_schemes(token: str) -> list[dict]:
     if cached is not None:
         return cached
     schemes: list[dict] = []
+    client = get_client()
     try:
-        schemes = get_client().list_entities("certification_scheme", token)
+        try:
+            # published without authentication on the bank-level model
+            schemes = client.list_public_entities("certification_scheme")
+        except DCRError:
+            schemes = client.list_entities("certification_scheme", token)
         for row in schemes:
             row.setdefault("source", "dcr")
     except DCRError as exc:
@@ -101,3 +106,110 @@ def certification_schemes(token: str) -> list[dict]:
         schemes = [dict(s) for s in SAMPLE_CERTIFICATION_SCHEMES]
     cache.set(key, schemes, settings.DCR["REFERENCE_CACHE_SECONDS"])
     return schemes
+
+
+# ------------------------------------------------------------------ vocabularies
+# Bank-level vocabularies DCR publishes without authentication
+# (/obp/dynamic-entity/banks/<bank>/public/<entity>), mapped to {"value", "label", ...}.
+
+# DCR renames plural entities to singular ones (Nov 2026); where a rename is pending, the
+# candidates are tried in order: the expected singular name first, the current name last.
+VOCABULARIES = {
+    # name: (DCR entity, id property, label property, {extra output key: DCR property})
+    "countries": ("country", "country_id", "country_name", {}),
+    "sustainable_development_goals": (
+        "sustainable_development_goal",
+        "sustainable_development_goal_id",
+        "sustainable_development_goal_name",
+        {"icon": "sustainable_development_goal_link"},
+    ),
+    "technologies_practices_processes": (
+        ("technology_practice_process", "technologies_practices_processes"),
+        ("technology_practice_process_id", "technologies_practices_processes_id"),
+        ("practice_name", "technology_practice_process_name"),
+        {},
+    ),
+    "co_benefits": ("co_benefit", "co_benefit_id", "co_benefit_name", {}),
+}
+
+
+def _names(value) -> tuple[str, ...]:
+    return (value,) if isinstance(value, str) else tuple(value)
+
+
+def vocabulary(name: str) -> list[dict] | None:
+    """A DCR vocabulary sorted by label (cached); None when DCR cannot serve it."""
+    entities, id_keys, label_keys, extra = (
+        _names(part) if i < 3 else part for i, part in enumerate(VOCABULARIES[name])
+    )
+    key = f"dcr:vocabulary:{name}"
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    rows = None
+    for entity in entities:
+        try:
+            rows = get_client().list_public_entities(entity)
+            break
+        except DCRError as exc:
+            if exc.status_code != 404:
+                logger.warning("vocabulary %s not available from DCR (%s)", entity, exc)
+                return None
+    if rows is None:
+        logger.warning("vocabulary %s not found on DCR under %s", name, ", ".join(entities))
+        return None
+    items = []
+    for row in rows:
+        id_key = next((k for k in id_keys if row.get(k)), id_keys[0])
+        label_key = next((k for k in label_keys if row.get(k)), label_keys[0])
+        value = row.get(id_key)
+        if not value:
+            continue
+        item = {"value": value, "label": row.get(label_key) or value}
+        item.update({out: row.get(prop) or "" for out, prop in extra.items()})
+        items.append(item)
+    items.sort(key=lambda item: item["label"].casefold())
+    cache.set(key, items, settings.DCR["REFERENCE_CACHE_SECONDS"])
+    return items
+
+
+# --------------------------------------------------------------- password policy
+
+
+def password_policy() -> dict | None:
+    """DCR's password policies (GET public/password-config, cached); None when unavailable."""
+    key = "dcr:password_config"
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        policy = get_client().password_config()
+    except DCRError as exc:
+        logger.warning("password policy not available from DCR (%s)", exc)
+        return None
+    if not isinstance(policy, dict) or not policy.get("policies"):
+        return None
+    cache.set(key, policy, 3600)
+    return policy
+
+
+def password_satisfies(password: str, policy: dict) -> bool:
+    """True when the password matches at least one of the policies (DCR's own rule)."""
+    import re
+
+    for rule in policy.get("policies", []):
+        pattern = rule.get("regex")
+        if pattern:
+            try:
+                if re.fullmatch(pattern, password):
+                    return True
+                continue
+            except re.error:
+                pass
+        low, high = rule.get("min_length") or 0, rule.get("max_length") or 10_000
+        classes = rule.get("required_character_classes", [])
+        if low <= len(password) <= high and all(
+            re.search(c.get("regex", ""), password) for c in classes
+        ):
+            return True
+    return False

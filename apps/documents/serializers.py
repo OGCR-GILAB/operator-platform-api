@@ -43,7 +43,10 @@ class DocumentSerializer(serializers.ModelSerializer):
     )
     uploaded_by_username = serializers.CharField(source="uploaded_by.username", read_only=True)
     download_url = serializers.SerializerMethodField()
-    is_frozen = serializers.BooleanField(read_only=True)
+    is_frozen = serializers.BooleanField(
+        read_only=True, help_text="No edits or new versions (final verdict, certificate, forwarded)"
+    )
+    is_deletable = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Document
@@ -64,6 +67,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "supersedes",
             "is_current",
             "is_frozen",
+            "is_deletable",
             "forward_status",
             "forwarded_at",
             "forward_reference",
@@ -121,8 +125,11 @@ class DocumentSerializer(serializers.ModelSerializer):
         user = self.context["request"].user
         if not user_can_access(user, project=project, parcel=parcel):
             raise serializers.ValidationError("You do not have access to this project or parcel")
-        if project is not None and not project.is_editable:
-            raise serializers.ValidationError("Project is no longer editable after submission")
+        parent = project or parcel
+        if not parent.accepts_documents:
+            raise serializers.ValidationError(
+                "No more documents: the certifier's verdict is final or a certificate is in force"
+            )
         return attrs
 
     def create(self, validated_data):

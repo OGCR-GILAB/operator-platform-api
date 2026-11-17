@@ -3,10 +3,17 @@ from django.urls import include, path
 from django.views.generic import RedirectView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
+from apps.changelog.views import ReleaseNotesView
+
 urlpatterns = [
     # the API has no landing page; send visitors to the interactive documentation
     path("", RedirectView.as_view(url="/api/docs/", permanent=False), name="root"),
     path("api/", RedirectView.as_view(url="/api/docs/", permanent=False), name="api-root"),
+    path(
+        "admin/release-notes/",
+        admin.site.admin_view(ReleaseNotesView.as_view(admin_site=admin.site)),
+        name="release-notes",
+    ),
     path("admin/", admin.site.urls),
     path("api/", include("apps.core.urls")),
     path("api/auth/", include("apps.dcr.urls")),

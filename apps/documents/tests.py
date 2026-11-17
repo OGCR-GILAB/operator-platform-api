@@ -114,11 +114,54 @@ class DocumentTests(APITestCase):
         )
         self.assertEqual(self.upload(parcel=self.parcel.pk).status_code, 400)
 
-    def test_submitted_project_freezes_documents(self):
+    def new_version(self, doc_id):
+        return self.client.post(
+            reverse("document-versions", args=[doc_id]),
+            {"file": SimpleUploadedFile("v.pdf", b"%PDF-1.4 v2", content_type="application/pdf")},
+            format="multipart",
+        )
+
+    def test_documents_after_submit_until_the_verdict_is_final(self):
         doc = self.upload(project=self.project.pk).json()
         self.project.status = Project.Status.SUBMITTED
         self.project.save()
+        # certifiers fetch documents during the audit: adding and new versions still work
+        added = self.upload(project=self.project.pk, title="Extra evidence")
+        self.assertEqual(added.status_code, 201, added.content)
+        self.assertFalse(added.json()["is_deletable"])
+        self.assertEqual(self.new_version(doc["id"]).status_code, 201)
+        # but nothing is deleted after submission
+        current = self.client.get(reverse("document-list") + f"?project={self.project.pk}").json()
+        some = current["results"][0]["id"]
         self.assertEqual(
-            self.client.delete(reverse("document-detail", args=[doc["id"]])).status_code, 409
+            self.client.delete(reverse("document-detail", args=[some])).status_code, 409
         )
+
+        # a final verdict closes the activity's documents
+        self.project.dcr_verification = {"status_code": "verified"}
+        self.project.save()
         self.assertEqual(self.upload(project=self.project.pk).status_code, 400)
+        self.assertEqual(self.new_version(some).status_code, 409)
+        patch = self.client.patch(
+            reverse("document-detail", args=[some]), {"title": "x"}, format="json"
+        )
+        self.assertEqual(patch.status_code, 409)
+
+    def test_parcel_documents_follow_its_activities(self):
+        from apps.parcels.models import ProjectParcel
+
+        ProjectParcel.objects.create(project=self.project, parcel=self.parcel)
+        self.parcel.dcr_sync_status = "synced"
+        self.parcel.dcr_id = "parcel-1"
+        self.parcel.save()
+        self.project.status = Project.Status.SUBMITTED
+        self.project.save()
+        doc = self.upload(parcel=self.parcel.pk)
+        self.assertEqual(doc.status_code, 201, doc.content)
+        self.assertEqual(
+            self.client.delete(reverse("document-detail", args=[doc.json()["id"]])).status_code,
+            409,
+        )
+        self.project.dcr_certificates = [{"certification_status": "active"}]
+        self.project.save()
+        self.assertEqual(self.upload(parcel=self.parcel.pk).status_code, 400)

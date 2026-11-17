@@ -1,13 +1,15 @@
 {
   "info": {
     "name": "OGCR Operator Platform - Partner API",
-    "description": "Read-only partner access: key check, parcel search by area, document download. Set the collection variables base_url and api_key.",
+    "description": "Read-only partner access: key check, parcel search by area, lookups by registry id, document download. Set the collection variables base_url and api_key.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     {"key": "base_url", "value": "https://api-operator.gilab.rs/api/partner"},
     {"key": "api_key", "value": "ogcr_PASTE_KEY_HERE"},
-    {"key": "document_id", "value": "1"}
+    {"key": "document_id", "value": "1"},
+    {"key": "activity_id", "value": "PASTE_DCR_ACTIVITY_ID"},
+    {"key": "parcel_id", "value": "PASTE_DCR_PARCEL_ID"}
   ],
   "auth": {
     "type": "apikey",
@@ -76,7 +78,23 @@
       "event": [{"listen": "test", "script": {"exec": ["pm.test('400', () => pm.response.to.have.status(400));"]}}]
     },
     {
-      "name": "7. Download document",
+      "name": "7. Activity by registry id",
+      "request": {"method": "GET", "url": "{{base_url}}/activities/{{activity_id}}/"},
+      "event": [{"listen": "test", "script": {"exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));",
+        "pm.test('parcels as GeoJSON', () => pm.expect(pm.response.json().parcels.type).to.eql('FeatureCollection'));"
+      ]}}]
+    },
+    {
+      "name": "8. Parcel by registry id",
+      "request": {"method": "GET", "url": "{{base_url}}/parcels/{{parcel_id}}/"},
+      "event": [{"listen": "test", "script": {"exec": [
+        "pm.test('200', () => pm.response.to.have.status(200));",
+        "pm.test('documents grouped by kind', () => pm.expect(pm.response.json().properties).to.have.property('documents_by_kind'));"
+      ]}}]
+    },
+    {
+      "name": "9. Download document",
       "request": {"method": "GET", "url": "{{base_url}}/documents/{{document_id}}/download/"},
       "event": [{"listen": "test", "script": {"exec": [
         "pm.test('200', () => pm.response.to.have.status(200));",

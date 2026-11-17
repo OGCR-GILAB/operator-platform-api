@@ -112,3 +112,19 @@ class RootRedirectTests(TestCase):
             response = self.client.get(url)
             self.assertEqual(response.status_code, 302, url)
             self.assertEqual(response["Location"], "/api/docs/")
+
+
+class DCRIdPrefixTests(TestCase):
+    def test_common_prefix_is_prepended_once(self):
+        from django.conf import settings
+
+        from apps.operators.models import Operator
+
+        operator = Operator(legal_name="X", email="x@example.org", country_code="FR")
+        with override_settings(DCR={**settings.DCR, "ID_PREFIX": "OPP-TEST"}):
+            dcr_id = operator.ensure_dcr_id("op")
+            self.assertTrue(dcr_id.startswith("OPP-TEST_op_"), dcr_id)
+            self.assertEqual(operator.ensure_dcr_id("op"), dcr_id)
+        plain = Operator(legal_name="Y", email="y@example.org", country_code="FR")
+        with override_settings(DCR={**settings.DCR, "ID_PREFIX": ""}):
+            self.assertTrue(plain.ensure_dcr_id("op").startswith("op_"))
