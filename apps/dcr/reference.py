@@ -83,6 +83,17 @@ SAMPLE_CERTIFICATION_SCHEMES = [
 ]
 
 
+def _dcr_scheme(row: dict) -> dict:
+    """
+    A DCR certification_scheme row in the shape the API serves. DCR renamed `name` to
+    `legal_name` (Nov 2026); `name` stays in the response, filled from either.
+    """
+    row = dict(row)
+    row.setdefault("source", "dcr")
+    row["name"] = row.get("name") or row.get("legal_name") or row.get("certification_scheme_id", "")
+    return row
+
+
 def certification_schemes(token: str) -> list[dict]:
     key = "dcr:reference:certification_scheme"
     cached = cache.get(key)
@@ -96,8 +107,7 @@ def certification_schemes(token: str) -> list[dict]:
             schemes = client.list_public_entities("certification_scheme")
         except DCRError:
             schemes = client.list_entities("certification_scheme", token)
-        for row in schemes:
-            row.setdefault("source", "dcr")
+        schemes = [_dcr_scheme(row) for row in schemes if isinstance(row, dict)]
     except DCRError as exc:
         if not settings.DCR["REFERENCE_SAMPLE_FALLBACK"]:
             raise

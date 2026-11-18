@@ -179,6 +179,29 @@ class CertificationSchemeTests(APITestCase):
         dcr.list_public_entities.assert_called_once_with("certification_scheme")
         dcr.list_entities.assert_not_called()
 
+    @mock.patch("apps.dcr.reference.get_client")
+    @mock.patch("apps.dcr.authentication.get_client")
+    def test_scheme_name_comes_from_legal_name(self, auth_client, ref_client):
+        # DCR renamed `name` to `legal_name` and added e-mail and logo (Nov 2026)
+        auth_client.return_value.current_user.return_value = PROFILE
+        ref_client.return_value.list_public_entities.return_value = [
+            {
+                "certification_scheme_id": "cs-2",
+                "legal_name": "TestWald Registry",
+                "email": "info@example.org",
+                "logo": "https://example.org/logo.svg",
+            },
+            {"certification_scheme_id": "cs-3"},
+        ]
+        headers = {"HTTP_AUTHORIZATION": 'DirectLogin token="tok-123"'}
+        response = self.client.get(reverse("dcr-certification-schemes"), **headers)
+        self.assertEqual(response.status_code, 200, response.content)
+        first, second = response.json()
+        self.assertEqual(first["name"], "TestWald Registry")
+        self.assertEqual(first["legal_name"], "TestWald Registry")
+        self.assertEqual(first["logo"], "https://example.org/logo.svg")
+        self.assertEqual(second["name"], "cs-3")
+
 
 class OnboardingTests(APITestCase):
     def setUp(self):

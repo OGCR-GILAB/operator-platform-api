@@ -17,7 +17,10 @@ class LoginResponseSerializer(serializers.Serializer):
 
 class CertificationSchemeSerializer(serializers.Serializer):
     certification_scheme_id = serializers.CharField()
-    name = serializers.CharField()
+    name = serializers.CharField(help_text="Scheme name (DCR `legal_name`)")
+    legal_name = serializers.CharField(required=False, allow_blank=True)
+    email = serializers.CharField(required=False, allow_blank=True)
+    logo = serializers.CharField(required=False, allow_blank=True)
     commission_decision_reference = serializers.CharField(required=False, allow_blank=True)
     certification_methodology = serializers.CharField(required=False, allow_blank=True)
     scheme_version_number = serializers.CharField(required=False, allow_blank=True)
