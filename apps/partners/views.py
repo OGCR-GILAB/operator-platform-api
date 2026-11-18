@@ -187,9 +187,10 @@ def _registry_owners(parcels) -> tuple:
 
 class ParcelSearchView(PartnerView):
     """
-    Parcels intersecting a geometry, with operator, projects, owner verification and
-    supporting documents. By default only parcels of at least one submitted project are
-    returned; `include_unsubmitted` adds the rest.
+    Parcels overlapping a geometry, with operator, projects, owner verification and
+    supporting documents. Neighbours that only touch the geometry or overlap it by a sliver
+    are left out (`min_overlap`). By default only parcels of at least one submitted project
+    are returned; `include_unsubmitted` adds the rest.
     """
 
     @extend_schema(request=ParcelSearchSerializer, responses={200: OpenApiTypes.OBJECT})

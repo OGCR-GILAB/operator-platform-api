@@ -598,11 +598,14 @@ def refresh_dcr_status(project: Project, dcr_token: str | None) -> dict:
     ):
         return _forget_dcr_outcome(project)
 
-    activity_rows = [
-        r
-        for r in fetch("activity_verification", activity_id=project.dcr_id)
-        if r.get("activity_id") == project.dcr_id
-    ]
+    activity_rows = _own_records(
+        [
+            r
+            for r in fetch("activity_verification", activity_id=project.dcr_id)
+            if r.get("activity_id") == project.dcr_id
+        ],
+        "activity_verification_id",
+    )
     links = list(project.parcel_links.select_related("parcel", "parcel__owner_verification"))
     _adopt_registry_parcels(client, dcr_token, project, links)
     sync_parcel_owners(client, dcr_token, links)
@@ -645,6 +648,7 @@ def refresh_dcr_status(project: Project, dcr_token: str | None) -> dict:
                 link.status_message = row.get("status_message") or ""
                 link.dcr_response = row
                 link.save()
+        sync_activity_verification_documents(client, dcr_token, project, activity_rows)
 
     if links:
         legacy = client.entity_exists("activity_parcel_verification")
@@ -764,6 +768,78 @@ def sync_parcel_owners(client: DCRClient, token: str, links) -> None:
 
 
 POV_DOCUMENT = "parcel_owner_verification_supporting_document"
+AV_DOCUMENT = "activity_verification_supporting_document"
+
+
+def _own_records(rows: list[dict], id_key: str) -> list[dict]:
+    """
+    With DCR_ID_PREFIX set (test setups), several certification platform instances may
+    answer the same activity; the records carrying this setup's prefix are the ones that
+    count. Without a prefix, or when none carries it, every record counts.
+    """
+    from django.conf import settings
+
+    common = settings.DCR.get("ID_PREFIX")
+    if not common:
+        return rows
+    own = [r for r in rows if str(r.get(id_key, "")).startswith(f"{common}_")]
+    return own or rows
+
+
+def sync_activity_verification_documents(
+    client: DCRClient, token: str, project, activity_rows: list[dict]
+) -> None:
+    """
+    Attach the activity's current documents (methodology, monitoring reports, ...) to its
+    activity verification on DCR: a `supporting_document` plus an
+    `activity_verification_supporting_document`, so the certification platform lists them.
+    Parcel documents go to the owner verification instead. A document counts as linked when
+    a linked supporting document points at the same download address. A failure is logged
+    and never stops the refresh.
+    """
+    if not project.accepts_documents:
+        return
+    documents = list(project.documents.filter(is_current=True).order_by("pk"))
+    verification_ids = []
+    for row in activity_rows:
+        if row.get("parcel_id"):
+            continue  # a verdict for one parcel, not the activity
+        record_id = row.get("activity_verification_id")
+        if record_id and record_id not in verification_ids:
+            verification_ids.append(record_id)
+    if not documents or not verification_ids:
+        return
+    verification_id = verification_ids[-1]
+    try:
+        linked_ids = {
+            row.get("supporting_document_id")
+            for row in client.list_entities(
+                AV_DOCUMENT, token, params={"activity_verification_id": verification_id}
+            )
+            if row.get("activity_verification_id") == verification_id
+        }
+        linked_urls = _document_urls(client, token, linked_ids)
+        for document in documents:
+            if dcr_mapping.supporting_document_url(document) in linked_urls:
+                continue
+            document_id = _ensure_supporting_document(client, token, document)
+            if document_id in linked_ids:
+                continue
+            client.create_entity(
+                AV_DOCUMENT,
+                {
+                    f"{AV_DOCUMENT}_id": new_dcr_id("avsdlink"),
+                    "supporting_document_id": document_id,
+                    "activity_verification_id": verification_id,
+                    "activity_id": project.dcr_id,
+                },
+                token,
+            )
+            linked_ids.add(document_id)
+    except DCRError as exc:
+        logger.warning(
+            "documents of activity %s not linked to its verification: %s", project.pk, exc
+        )
 
 
 def sync_owner_verification_documents(client: DCRClient, token: str, links) -> None:

@@ -1,6 +1,7 @@
 from datetime import date
 from unittest import mock
 
+from django.conf import settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase
@@ -1501,3 +1502,113 @@ class OwnerVerificationMirrorTests(ProjectBase):
             },
         )
         self.assertEqual(ParcelOwnerVerification.objects.get(parcel=parcel).dcr_id, "new_pov")
+
+
+class ActivityVerificationDocumentTests(ProjectBase):
+    """Activity documents are linked to the activity verification the certifier creates."""
+
+    def setUp(self):
+        super().setUp()
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        from apps.documents.models import Document
+
+        self.project = self.make_project(status="submitted", dcr_id="OPP_act_1")
+        self.method = Document.objects.create(
+            project=self.project,
+            operator=self.operator,
+            uploaded_by=self.user,
+            kind="methodology",
+            title="Methodology",
+            file=SimpleUploadedFile("method.pdf", b"%PDF method"),
+            original_name="method.pdf",
+            content_type="application/pdf",
+            size=11,
+            sha256="a" * 64,
+        )
+
+    def refresh(self, verifications):
+        from django.test import override_settings
+
+        registry = {("activity", "OPP_act_1"): {"activity_id": "OPP_act_1"}}
+        av_links = []
+        client = mock.MagicMock()
+        client.current_user.return_value = {"user_id": "dcr-user-1", "username": "alice"}
+        client.entity_exists.return_value = None
+        client.entity_fields.return_value = None
+
+        def get_entity(entity, record_id, token):
+            if (entity, record_id) in registry:
+                return dict(registry[(entity, record_id)])
+            raise DCRError("OBP-09005: Entity not found", 404)
+
+        def create(entity, payload, token):
+            if entity == "activity_verification_supporting_document":
+                av_links.append(dict(payload))
+            else:
+                registry[(entity, payload[f"{entity}_id"])] = dict(payload)
+            return dict(payload)
+
+        def list_entities(entity, token, params=None):
+            if entity == "activity_verification":
+                return [dict(v) for v in verifications]
+            if entity == "activity_verification_supporting_document":
+                return list(av_links)
+            return []
+
+        client.get_entity.side_effect = get_entity
+        client.create_entity.side_effect = create
+        client.list_entities.side_effect = list_entities
+        self.client.force_authenticate(None)
+        self.client.credentials(HTTP_AUTHORIZATION='DirectLogin token="tok-1"')
+        with (
+            mock.patch("apps.projects.services.get_client", return_value=client),
+            mock.patch("apps.dcr.authentication.get_client", return_value=client),
+            override_settings(
+                PUBLIC_API_URL="https://api.example.org", DCR={**settings.DCR, "ID_PREFIX": "OPP"}
+            ),
+        ):
+            response = self.client.post(reverse("project-dcr-status", args=[self.project.pk]))
+            self.assertEqual(response.status_code, 200, response.content)
+            # a second refresh links nothing new
+            before = len(av_links)
+            self.client.post(reverse("project-dcr-status", args=[self.project.pk]))
+            self.assertEqual(len(av_links), before)
+        self.project.refresh_from_db()
+        return av_links
+
+    def test_activity_documents_are_linked_once_to_own_verification(self):
+        links = self.refresh(
+            [
+                {
+                    "activity_verification_id": "OPP_av_1",
+                    "activity_id": "OPP_act_1",
+                    "status_code": "draft",
+                },
+                # another certification platform instance answering the same activity
+                {
+                    "activity_verification_id": "OTHER_av_9",
+                    "activity_id": "OPP_act_1",
+                    "status_code": "failed",
+                },
+                # a verdict for one parcel is not where activity documents go
+                {
+                    "activity_verification_id": "OPP_av_2",
+                    "activity_id": "OPP_act_1",
+                    "parcel_id": "p1",
+                    "status_code": "draft",
+                },
+            ]
+        )
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["activity_verification_id"], "OPP_av_1")
+        self.assertEqual(links[0]["activity_id"], "OPP_act_1")
+        self.assertTrue(
+            links[0]["activity_verification_supporting_document_id"].startswith("OPP_avsdlink_")
+        )
+        # the other instance's failed verdict does not reject the activity
+        self.assertEqual(self.project.status, "submitted")
+        self.assertEqual(self.project.dcr_verification["activity_verification_id"], "OPP_av_2")
+
+    def test_nothing_is_linked_without_a_verification(self):
+        self.assertEqual(self.refresh([]), [])
